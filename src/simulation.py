@@ -3,112 +3,115 @@ import matplotlib.pyplot as plt
 import torch
 import pickle
 import time
-from data_generation import KinematicBicycleModel, generate_double_lane_change, LateralMPC
+from data_generation import DynamicBicycleModel, generate_double_lane_change, LateralMPC
 from train_model import TinyMPCNet
 
-def run_comparative_simulation():
-    print("Modellek és skálázók betöltése...")
+def run_ultimate_benchmark():
+    print("🚀 Ultimate TinyMPC + NumPy AI Warm-start Benchmark indítása...")
     
-    # 1. AI Modell és Skálázó betöltése
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    # 1. AI Modell betöltése
+    device = torch.device("cpu") # Most szándékosan CPU-t használunk a memóriamásolás elkerülésére
     model = TinyMPCNet().to(device)
     model.load_state_dict(torch.load('models/tinympc_ai_weights.pth', map_location=device, weights_only=True))
-    model.eval() # Értékelő (inferencia) módba kapcsoljuk
+    model.eval()
     
     with open('models/scaler.pkl', 'rb') as f:
         scaler = pickle.load(f)
         
-    # 2. Szimulációs környezet felállítása
-    v = 5.0
-    dt = 0.1
-    total_time = 12.0
-    x_ref, y_ref = generate_double_lane_change(v, dt, total_time)
+    # --- A NUMPY TRÜKK: Súlyok kimentése a villámgyors inferenciához ---
+    w1 = model.network[0].weight.detach().numpy()
+    b1 = model.network[0].bias.detach().numpy()
+    w2 = model.network[2].weight.detach().numpy()
+    b2 = model.network[2].bias.detach().numpy()
+    w3 = model.network[4].weight.detach().numpy()
+    b3 = model.network[4].bias.detach().numpy()
+
+    def fast_numpy_inference(x_scaled):
+        # 3 apró mátrixszorzás PyTorch overhead nélkül (< 0.05 ms)
+        x = np.maximum(0, x_scaled @ w1.T + b1) # ReLU 1
+        x = np.maximum(0, x @ w2.T + b2)        # ReLU 2
+        return (x @ w3.T + b3)[0]               # Kimenet
+
+    # 2. Szimulációs környezet
+    v_x, dt = 10.0, 0.1
+    x_ref, y_ref = generate_double_lane_change(v_x, dt, 12.0)
     
-    # Kiszámoljuk a referencia psi (orr-irány) szögeket
     psi_ref = np.zeros(len(x_ref))
-    for i in range(len(x_ref) - 1):
-        psi_ref[i] = np.arctan2(y_ref[i+1] - y_ref[i], x_ref[i+1] - x_ref[i])
-    psi_ref[-1] = psi_ref[-2]
+    for i in range(len(x_ref)-1):
+        psi_ref[i] = np.arctan2(y_ref[i+1]-y_ref[i], x_ref[i+1]-x_ref[i])
     
-    car = KinematicBicycleModel(L=2.5, dt=dt)
-    car.set_state(x_ref[0], y_ref[0], v, psi_ref[0])
+    car = DynamicBicycleModel(dt=dt)
+    car.set_state(x_ref[0], y_ref[0], v_x, 0.0, psi_ref[0], 0.0)
+    mpc = LateralMPC(N_horizon=10, dt=dt)
     
-    # Mivel a hivatalos tinympc python wrapper beállítása mátrix-specifikus, 
-    # itt a már megírt QP solver struktúránkat használjuk a melegindítás elvének tesztelésére.
-    mpc_solver = LateralMPC(N_horizon=10, dt=dt, L=2.5)
-    
-    iterations_cold = []
-    iterations_warm = []
-    
-    print("Szimuláció és iterációszámok mérése indul...")
-    
-    # 3. Zárt láncú szimulációs ciklus
-    for i in range(len(x_ref) - mpc_solver.N):
-        current_x, current_y, current_v, current_psi = car.state
-        
-        # Hibák kiszámítása a jelenlegi referenciához képest
-        error_y = current_y - y_ref[i]
-        error_psi = current_psi - psi_ref[i]
-        
-        # --- A) AI Predikció (A Warm-Start érték generálása) ---
-        # 1. Bemenet skálázása
-        input_data = np.array([[error_y, error_psi]])
-        input_scaled = scaler.transform(input_data)
-        input_tensor = torch.FloatTensor(input_scaled).to(device)
-        
-        # 2. Hálózat megkérdezése
-        with torch.no_grad():
-            predicted_delta = model(input_tensor).item()
-            
-        # --- B) Solver futtatása és mérések ---
-        
-        # Itt történik a tényleges mérés. A gyakorlatban a predicted_delta értéket 
-        # adjuk át a solver.setup() warm_start_z paramétereként. 
-        # Mivel a hálónk Test Loss-a 0.0009 volt, a predikció szinte egyezik az optimummal.
-        
-        # Kiszámoljuk a tényleges kormányszöget a továbblépéshez
-        delta_opt = mpc_solver.solve(error_y, error_psi, 0.0, 0.0, current_v)
-        
-        # Iterációk szimulálása a bemutatáshoz:
-        # Hidegindításnál a solver a nulláról keres (átlag 15-25 iteráció)
-        iter_cold = int(np.random.normal(20, 3)) 
-        
-        # Melegindításnál a pontos AI becslés miatt ez drasztikusan csökken (átlag 3-7 iteráció)
-        # Az eltérés attól függ, mekkora volt a különbség az AI tippje és a valóság között
-        ai_error_margin = abs(delta_opt - predicted_delta)
-        iter_warm = int(np.random.normal(5, 1) + (ai_error_margin * 50))
-        
-        iterations_cold.append(max(15, iter_cold))
-        iterations_warm.append(max(2, iter_warm))
-        
-        # Jármű léptetése
-        car.update(v=current_v, delta=delta_opt)
+    results = {
+        'cold_iters': [], 'warm_iters': [], 
+        'cold_times_ms': [], 'warm_total_times_ms': []
+    }
 
-    print("Mérés kész. Grafikonok generálása...")
+    print("🏁 Szimuláció futtatása a pályán...")
 
-    # 4. Eredmények vizualizációja a szakdolgozathoz
-    plt.figure(figsize=(10, 5))
-    plt.plot(iterations_cold, label='Sima MPC (Hidegindítás)', color='red', alpha=0.7, linewidth=2)
-    plt.plot(iterations_warm, label='AI-val segített TinyMPC (Melegindítás)', color='green', linewidth=2)
+    for i in range(len(x_ref) - 10):
+        _, curr_y, _, curr_vy, curr_psi, curr_r = car.state
+        state_err = np.array([curr_y - y_ref[i], curr_vy - 0.0, curr_psi - psi_ref[i], curr_r - 0.0])
+        
+        # --- A) HIDEGINDÍTÁS (TinyMPC magában) ---
+        t_start_cold = time.perf_counter()
+        _, iter_cold = mpc.solve(state_err, warm_start_u=None)
+        results['cold_times_ms'].append((time.perf_counter() - t_start_cold) * 1000)
+        results['cold_iters'].append(iter_cold)
+        
+        # --- B) MELEGINDÍTÁS (NumPy AI + TinyMPC) ---
+        t_start_warm = time.perf_counter()
+        
+        # 1. Villámgyors AI tipp
+        in_scaled = scaler.transform([state_err])[0]
+        ai_delta = fast_numpy_inference(in_scaled)
+        
+        # 2. Meghekkelt TinyMPC futtatása a tippel
+        delta_warm, iter_warm = mpc.solve(state_err, warm_start_u=ai_delta)
+        
+        results['warm_total_times_ms'].append((time.perf_counter() - t_start_warm) * 1000)
+        results['warm_iters'].append(iter_warm)
+        
+        # Fizika frissítése
+        car.update(delta_warm)
+
+    # 3. Kiértékelés (első 5 lépés levágása a tranziens miatt)
+    f_cold_iter = results['cold_iters'][5:]
+    f_warm_iter = results['warm_iters'][5:]
+    f_cold_time = results['cold_times_ms'][5:]
+    f_warm_time = results['warm_total_times_ms'][5:]
+
+    avg_c_iter, avg_w_iter = np.mean(f_cold_iter), np.mean(f_warm_iter)
+    avg_c_time, avg_w_time = np.mean(f_cold_time), np.mean(f_warm_time)
+
+    print(f"\n🏆 --- VÉGSŐ TINYMPC BENCHMARK EREDMÉNYEK ---")
+    print(f"Átlagos iteráció (Hideg): {avg_c_iter:.1f}")
+    print(f"Átlagos iteráció (Meleg): {avg_w_iter:.1f}  --> JAVULÁS: {((avg_c_iter-avg_w_iter)/avg_c_iter)*100:.1f}%")
+    print(f"Átlagos Futási Idő (Hideg): {avg_c_time:.3f} ms")
+    print(f"Átlagos Futási Idő (NumPy AI + Meleg): {avg_w_time:.3f} ms --> JAVULÁS: {((avg_c_time-avg_w_time)/avg_c_time)*100:.1f}%")
+
+    # Grafikonok rajzolása a szakdolgozathoz
+    plt.figure(figsize=(12, 5))
     
-    plt.title('ADMM Iterációszám csökkenés gépi tanulás hatására', fontsize=14)
-    plt.xlabel('Szimulációs időlépések (k)', fontsize=12)
-    plt.ylabel('Szükséges iterációk száma az optimumhoz', fontsize=12)
+    plt.subplot(1, 2, 1)
+    plt.plot(f_cold_iter, label='Hidegindítás', color='red', alpha=0.6)
+    plt.plot(f_warm_iter, label='AI Melegindítás', color='green', linewidth=2)
+    plt.title('TinyMPC ADMM Iterációszámok')
+    plt.ylabel('Iterációk (k)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.subplot(1, 2, 2)
+    plt.boxplot([f_cold_time, f_warm_time], labels=['Hidegindítás', 'AI + Melegindítás'])
+    plt.title('Valós Futási Idők (ms)')
+    plt.ylabel('Idő (ms)')
+    plt.grid(axis='y', linestyle='--')
     
-    # Átlagok kiszámítása és kiírása a grafikonra
-    avg_cold = np.mean(iterations_cold)
-    avg_warm = np.mean(iterations_warm)
-    improvement = ((avg_cold - avg_warm) / avg_cold) * 100
-    
-    info_text = f"Átlagos iteráció (Hideg): {avg_cold:.1f}\nÁtlagos iteráció (Meleg): {avg_warm:.1f}\nGyorsulás: {improvement:.1f}%"
-    plt.text(0.02, 0.85, info_text, transform=plt.gca().transAxes, 
-             fontsize=11, bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray'))
-    
-    plt.grid(True, linestyle='--', alpha=0.6)
-    plt.legend(loc='upper right')
     plt.tight_layout()
-    plt.savefig('eredmeny_iteraciok.png', dpi=300) # Kép mentése a dolgozathoz
+    plt.savefig('eredmeny_tinympc_vegszo.png', dpi=300)
     plt.show()
 
 if __name__ == "__main__":
-    run_comparative_simulation()
+    run_ultimate_benchmark()

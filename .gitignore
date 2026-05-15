@@ -1,0 +1,12 @@
+# Python specifikus fájlok
+__pycache__/
+*.py[cod]
+
+# Virtuális környezet (ha majd létrehozunk egyet)
+venv/
+env/
+
+# Adatok és modellek (ezeket csak helyben tartjuk meg)
+data/
+models/
+*.csv

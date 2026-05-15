@@ -3,259 +3,162 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import os
 import random
+from scipy.ndimage import gaussian_filter1d
+import tinympc
+from tinympc import TinyMPC  # Biztosítjuk a helyes importot
 
-class KinematicBicycleModel:
-    def __init__(self, L=2.5, dt=0.05):
-        """
-        L: tengelytávolság (méter)
-        dt: mintavételi idő / időlépés (másodperc)
-        """
-        self.L = L
+# --- 1. MODELLEK ---
+
+class DynamicBicycleModel:
+    def __init__(self, dt=0.1):
         self.dt = dt
+        self.m, self.Iz = 1500.0, 3000.0
+        self.lf, self.lr = 1.2, 1.3
+        self.Cf, self.Cr = 50000.0, 50000.0
+        self.state = np.zeros(6)
         
-        # Állapotvektor: [x, y, v, psi (yaw szög)]
-        self.state = np.zeros(4)
+    def set_state(self, x, y, v_x, v_y, psi, r):
+        self.state = np.array([x, y, v_x, v_y, psi, r], dtype=float)
         
-    def set_state(self, x, y, v, psi):
-        """Kezdőállapot beállítása."""
-        self.state = np.array([x, y, v, psi], dtype=float)
-        
-    def update(self, v, delta):
-        """
-        Állapot frissítése az irányítási bemenetek alapján.
-        v: jármű sebessége (m/s) - itt most a sebességet is vezéreljük a kormányszög mellett
-        delta: kormányszög (radián)
-        """
-        x, y, _, psi = self.state
-        
-        # Differenciálegyenletek a kinematikai modellhez (Euler diszkretizáció)
-        x_new = x + v * np.cos(psi) * self.dt
-        y_new = y + v * np.sin(psi) * self.dt
-        psi_new = psi + (v / self.L) * np.tan(delta) * self.dt
-        
-        # Új állapot mentése (a sebességet átvesszük a bemenetből)
-        self.state = np.array([x_new, y_new, v, psi_new])
-        
+    def update(self, delta):
+        x, y, v_x, v_y, psi, r = self.state
+        v_x = max(v_x, 1.0)
+        alpha_f = delta - np.arctan2((v_y + self.lf * r), v_x)
+        alpha_r = - np.arctan2((v_y - self.lr * r), v_x)
+        F_yf, F_yr = self.Cf * alpha_f, self.Cr * alpha_r
+        a_y = (F_yf + F_yr) / self.m - v_x * r
+        r_dot = (self.lf * F_yf - self.lr * F_yr) / self.Iz
+        self.state = np.array([
+            x + (v_x * np.cos(psi) - v_y * np.sin(psi)) * self.dt,
+            y + (v_x * np.sin(psi) + v_y * np.cos(psi)) * self.dt,
+            v_x,
+            v_y + a_y * self.dt,
+            psi + r * self.dt,
+            r + r_dot * self.dt
+        ])
         return self.state
-    
 
-import osqp
-import numpy as np
-from scipy import sparse
+# --- 2. SOLVER (LateralMPC definíciója) ---
 
 class LateralMPC:
-    def __init__(self, N_horizon=10, dt=0.1, L=2.5):
-        # Paraméterek
-        self.N = N_horizon
-        self.dt = dt
-        self.L = L
-        self.nx = 2  # Állapotok száma: [y, psi]
-        self.nu = 1  # Bemenetek száma: [delta (kormányszög)]
+    def __init__(self, N_horizon=10, dt=0.1):
+        self.N, self.dt = N_horizon, dt
+        self.nx, self.nu = 4, 1
         
-        # Súlymátrixok beállítása [cite: 187-188]
-        # Q: mennyire büntetjük, ha letér a pályáról (y) vagy rossz az orr-irány (psi)
-        self.Q = sparse.diags([10.0, 1.0]) 
-        # R: mennyire büntetjük a kormányszög hirtelen változását
-        self.R = sparse.diags([0.1])
+        # Jármű paraméterek
+        m, Iz, lf, lr, Cf, Cr = 1500.0, 3000.0, 1.2, 1.3, 50000.0, 50000.0
+        v_x = 10.0
         
-        # Kormányszög fizikai korlátai (Amplitúdó kényszer [cite: 226-227])
-        # kb. +- 30 fok radiánban kifejezve
-        self.delta_min = -0.52
-        self.delta_max = 0.52
-        
-        self.solver = osqp.OSQP()
-        self.solver_setup_done = False
-        
-    def solve(self, current_y, current_psi, target_y, target_psi, v):
-        """Kiszámolja az optimális kormányszöget a következő lépésre."""
-        
-        # 1. Lineáris modell mátrixai (A és B) az adott sebességhez [cite: 151-153]
-        A = sparse.csc_matrix([
-            [1.0, v * self.dt],
-            [0.0, 1.0]
+        Ac = np.array([
+            [0, 1, 0, 0],
+            [0, -(2*Cf + 2*Cr)/(m*v_x), 0, -(2*Cf*lf - 2*Cr*lr)/(m*v_x) - v_x],
+            [0, 0, 0, 1],
+            [0, -(2*Cf*lf - 2*Cr*lr)/(Iz*v_x), 0, -(2*Cf*lf**2 + 2*Cr*lr**2)/(Iz*v_x)]
         ])
-        B = sparse.csc_matrix([
-            [0.0],
-            [(v * self.dt) / self.L]
-        ])
+        Bc = np.array([[0], [2*Cf/m], [0], [2*Cf*lf/Iz]])
         
-        # 2. QP Költségfüggvény (P és q) felépítése [cite: 252-254]
-        P = sparse.block_diag([sparse.kron(sparse.eye(self.N), self.Q), self.Q,
-                               sparse.kron(sparse.eye(self.N), self.R)], format='csc')
+        self.Ad = np.eye(4) + Ac * self.dt
+        self.Bd = Bc * self.dt
         
-        target_state = np.array([-target_y, -target_psi])
-        q = np.hstack([np.kron(np.ones(self.N), self.Q @ target_state), 
-                       self.Q @ target_state, 
-                       np.zeros(self.N * self.nu)])
+        self.Q = [10.0, 0.1, 1.0, 0.1]
+        self.R = [0.1]
+        self.u_min, self.u_max = [-0.52], [0.52]
+        self.x_min = [-10.0, -5.0, -1.0, -2.0]
+        self.x_max = [10.0, 5.0, 1.0, 2.0]
+
+        # Példányosítás
+        self.prob = TinyMPC()
         
-        # 3. Dinamikai és kényszer egyenletek felépítése [cite: 223-228]
-        Ax = sparse.kron(sparse.eye(self.N + 1), -sparse.eye(self.nx)) + sparse.kron(sparse.eye(self.N + 1, k=-1), A)
-        Bu = sparse.kron(sparse.vstack([sparse.csc_matrix((1, self.N)), sparse.eye(self.N)]), B)
-        A_eq = sparse.hstack([Ax, Bu])
+        # Setup hívás
+        self.prob.setup(self.Ad.astype(np.float64), 
+                        self.Bd.astype(np.float64), 
+                        np.diag(self.Q).astype(np.float64), 
+                        np.diag(self.R).astype(np.float64), 
+                        int(self.N),  # <--- Itt a trükk: ez kötelezően az 5. paraméter
+                        rho=0.01,
+                        x_min=np.array(self.x_min).astype(np.float64), 
+                        x_max=np.array(self.x_max).astype(np.float64), 
+                        u_min=np.array(self.u_min).astype(np.float64), 
+                        u_max=np.array(self.u_max).astype(np.float64))
         
-        leq = np.zeros((self.N + 1) * self.nx)
-        leq[0:self.nx] = -np.array([current_y, current_psi])
-        ueq = leq
+        self.prob.update_settings(abs_pri_tol=1e-3, abs_dua_tol=1e-3, max_iter=1000)
+
+    def solve(self, state_error, warm_start_u=None):
+        self.prob.set_x0(state_error.astype(np.float64))
         
-        A_ineq = sparse.hstack([sparse.csc_matrix((self.N * self.nu, (self.N + 1) * self.nx)), sparse.eye(self.N * self.nu)])
-        lineq = np.ones(self.N * self.nu) * self.delta_min
-        uineq = np.ones(self.N * self.nu) * self.delta_max
+        # A kontroll horizont mérete N-1 (ebben az esetben 9)
+        control_N = self.N - 1
         
-        A_osqp = sparse.vstack([A_eq, A_ineq], format='csc')
-        l = np.hstack([leq, lineq])
-        u = np.hstack([ueq, uineq])
-        
-        # 4. OSQP Solver indítása [cite: 259-260]
-        if not self.solver_setup_done:
-            self.solver.setup(P, q, A_osqp, l, u, warm_start=True, verbose=False)
-            self.solver_setup_done = True
+        if warm_start_u is not None:
+            # Itt (nu x control_N) méretet küldünk, ami 1x9 lesz
+            U_guess = np.tile(warm_start_u, (self.nu, control_N)).astype(np.float64) 
+            self.prob.set_warm_start(U_guess)
         else:
-            self.solver.update(q=q, l=l, u=u)
-            self.solver.update(Ax=A_osqp.data)
-            
-        res = self.solver.solve()
+            # Itt is a 1x9-es nulla mátrix kell
+            self.prob.set_warm_start(np.zeros((self.nu, control_N)).astype(np.float64))
         
-        # Visszaadjuk a kiszámolt horizontból a legelső kormányszöget [cite: 207-209]
-        if res.info.status_val == 1:
-            u_opt = res.x[-self.N * self.nu:]
-            return u_opt[0]
-        else:
-            # Ha a solver valamiért nem talál megoldást, vészhelyzeti 0 fok
-            return 0.0
+        self.prob.solve()
+        res = self.prob.get_solution()
         
+        # Az iterációszám kiolvasása a get_info() segítségével
+        iters = self.prob.get_info().iter
+        
+        # Visszaadjuk az első kormányszöget és az iterációkat
+        return res.u[:, 0][0], iters
+
+# --- 3. UTILS & ADATGENERÁLÁS ---
 
 def generate_double_lane_change(v=5.0, dt=0.1, total_time=10.0):
-    """
-    Legenerál egy egyszerű dupla sávváltás referenciapályát.
-    Visszatér: x_ref, y_ref (numpy tömbök)
-    """
     steps = int(total_time / dt)
-    x_ref = np.zeros(steps)
-    y_ref = np.zeros(steps)
-    
+    x_ref, y_ref = np.zeros(steps), np.zeros(steps)
     for i in range(steps):
-        # Az X pozíció egyenletesen nő a sebesség függvényében
         x_ref[i] = i * v * dt
-        
-        # Az Y pozíció (sáv) változása
-        if x_ref[i] < 10.0:
-            y_ref[i] = 0.0              # Eredeti sáv
-        elif x_ref[i] < 20.0:
-            y_ref[i] = 3.0              # Áttérés a bal sávba (3 méter széles)
-        elif x_ref[i] < 30.0:
-            y_ref[i] = 3.0              # Haladás a bal sávban
-        elif x_ref[i] < 40.0:
-            y_ref[i] = 0.0              # Visszatérés a jobb sávba
-        else:
-            y_ref[i] = 0.0              # Haladás a jobb sávban
-            
-    # Hogy ne legyenek benne éles, fizikailag lehetetlen ugrások, kicsit "lesimítjuk" egy szűrővel
-    from scipy.ndimage import gaussian_filter1d
-    y_ref = gaussian_filter1d(y_ref, sigma=3.0)
-        
-    return x_ref, y_ref
+        if x_ref[i] < 10.0: y_ref[i] = 0.0
+        elif x_ref[i] < 20.0: y_ref[i] = 3.0
+        elif x_ref[i] < 30.0: y_ref[i] = 3.0
+        elif x_ref[i] < 40.0: y_ref[i] = 0.0
+        else: y_ref[i] = 0.0
+    return x_ref, gaussian_filter1d(y_ref, sigma=3.0)
 
-def run_closed_loop_simulation():
-    # Szimulációs paraméterek
-    v = 5.0         # 5 m/s sebesség
-    dt = 0.1        # 0.1s időlépés
-    total_time = 12.0
-    
-    # 1. Referencia pálya generálása
-    x_ref, y_ref = generate_double_lane_change(v, dt, total_time)
-    steps = len(x_ref)
-    
-    # Cél orr-irány (psi) kiszámítása a pálya vonalvezetéséből
-    psi_ref = np.zeros(steps)
-    for i in range(steps - 1):
-        dx = x_ref[i+1] - x_ref[i]
-        dy = y_ref[i+1] - y_ref[i]
-        psi_ref[i] = np.arctan2(dy, dx)
-    psi_ref[-1] = psi_ref[-2]
-    
-    # 2. Rendszerek inicializálása
-    car = KinematicBicycleModel(L=2.5, dt=dt)
-    car.set_state(x_ref[0], y_ref[0], v, psi_ref[0]) # Az autó a pálya elejéről indul
-    
-    mpc = LateralMPC(N_horizon=10, dt=dt, L=2.5)
-    
-    # Adatgyűjtők a rajzoláshoz
-    x_history = []
-    y_history = []
-    
-    print("Szimuláció indítása...")
-    
-    # 3. Szimulációs ciklus (Zárt láncú irányítás)
-    # Azért vonjuk ki a horizontot (mpc.N), hogy a pálya legvégén is lásson előre a solver
-    for i in range(steps - mpc.N):
-        current_x, current_y, current_v, current_psi = car.state
-        
-        # Célállapot lekérése a pályáról
-        target_y = y_ref[i]
-        target_psi = psi_ref[i]
-        
-        # MPC meghívása (Ez itt az online optimalizáció [cite: 199-200])
-        delta_opt = mpc.solve(current_y, current_psi, target_y, target_psi, current_v)
-        
-        # Jármű léptetése a kiszámolt optimális kormányszöggel [cite: 208]
-        car.update(v=current_v, delta=delta_opt)
-        
-        # Adatok mentése
-        x_history.append(current_x)
-        y_history.append(current_y)
-        
-    print("Szimuláció vége. Eredmények kirajzolása...")
-        
-    # 4. Eredmények kirajzolása
-    plt.figure(figsize=(12, 5))
-    plt.plot(x_ref, y_ref, '--', color='gray', linewidth=2, label='Referencia (Sávváltás)')
-    plt.plot(x_history, y_history, '-b', linewidth=2, label='MPC által vezetett autó')
-    plt.title('Zárt láncú MPC Szimuláció - ISO Dupla Sávváltás', fontsize=14)
-    plt.xlabel('X pozíció (m)')
-    plt.ylabel('Y pozíció (m)')
-    plt.legend()
-    plt.grid(True)
-    plt.axis('equal')
-    plt.show()
-
-def generate_training_data(num_samples=10000):
-    print(f"{num_samples} db minta generálása indul. Ez eltarthat 10-20 másodpercig...")
-    
-    mpc = LateralMPC(N_horizon=10, dt=0.1, L=2.5)
-    v = 5.0 # Fix sebességgel tanítunk
-    
+def generate_dynamic_training_data(num_samples=10000):
+    print(f"🚀 {num_samples} db dinamikus minta generálása (N=10, u_horizont=9)...")
+    mpc = LateralMPC(N_horizon=10, dt=0.1)
     data = []
     
     for i in range(num_samples):
-        # Generálunk egy véletlenszerű helyzetet (hibát a célhoz képest)
-        # Az autó lehet max 3 méterrel balra/jobbra, és +- 30 fokban elfordulva
-        error_y = random.uniform(-3.0, 3.0)
-        error_psi = random.uniform(-0.5, 0.5)
+        # Véletlenszerű állapotok a tanításhoz
+        err_y = random.uniform(-3.0, 3.0)
+        err_vy = random.uniform(-1.0, 1.0)
+        err_psi = random.uniform(-0.5, 0.5)
+        err_r = random.uniform(-1.0, 1.0)
+        state_err = np.array([err_y, err_vy, err_psi, err_r])
         
-        # Megkérdezzük az MPC-t, mi a teendő. 
-        # A target_y és target_psi most 0.0, mert a hibát az 'error_y' változókban adjuk át
-        opt_steering = mpc.solve(current_y=error_y, current_psi=error_psi, 
-                                 target_y=0.0, target_psi=0.0, v=v)
+        # Megoldás a frissített solve függvénnyel
+        delta, iters = mpc.solve(state_err) 
         
-        # Lementjük a sort: (Y hiba, Szög hiba, Optimális Kormányszög)
-        data.append({
-            'error_y': error_y,
-            'error_psi': error_psi,
-            'optimal_delta': opt_steering
-        })
+        # Csak a konvergált megoldásokat mentjük
+        if iters < 950: 
+            data.append({
+                'e_y': err_y, 'e_vy': err_vy, 
+                'e_psi': err_psi, 'e_r': err_r, 
+                'delta': delta
+            })
         
-        # Egy kis visszajelzés, hogy lássuk, nem fagyott le
-        if (i + 1) % 2000 == 0:
-            print(f"... {i + 1} minta kész")
-            
-    # Mappa ellenőrzése és fájl mentése
+        if (i+1) % 2000 == 0:
+            print(f"... {i+1} minta kész")
+
+    # Adatok mentése fokozott biztonsággal
     os.makedirs('data', exist_ok=True)
     df = pd.DataFrame(data)
-    df.to_csv('data/mpc_dataset.csv', index=False)
+    file_path = 'data/mpc_dynamic_dataset.csv'
     
-    print("Adatgenerálás befejezve! Fájl mentve: data/mpc_dataset.csv")
+    with open(file_path, 'w', encoding='utf-8') as f:
+        df.to_csv(f, index=False)
+        f.flush()
+        if hasattr(os, 'fsync'):
+            os.fsync(f.fileno())
 
+    print(f"✅ SIKER! {len(df)} minta elmentve: {file_path}")
 
 if __name__ == "__main__":
-    # run_closed_loop_simulation() # Ezt most kikommenteltük
-    generate_training_data(num_samples=10000)
+    generate_dynamic_training_data(num_samples=10000)
