@@ -41,7 +41,7 @@ class DynamicBicycleModel:
 # --- 2. SOLVER (LateralMPC definíciója) ---
 
 class LateralMPC:
-    def __init__(self, N_horizon=10, dt=0.1):
+    def __init__(self, N_horizon=10, dt=0.1, Q_diag=[30.0, 0.1, 5.0, 0.1], R_diag=[0.1], u_bound=0.52):
         self.N, self.dt = N_horizon, dt
         self.nx, self.nu = 4, 1
         
@@ -60,65 +60,70 @@ class LateralMPC:
         self.Ad = np.eye(4) + Ac * self.dt
         self.Bd = Bc * self.dt
         
-        self.Q = [10.0, 0.1, 1.0, 0.1]
-        self.R = [0.1]
-        self.u_min, self.u_max = [-0.52], [0.52]
-        self.x_min = [-10.0, -5.0, -1.0, -2.0]
-        self.x_max = [10.0, 5.0, 1.0, 2.0]
-
-        # Példányosítás
-        self.prob = TinyMPC()
+        # Szigorított dinamikus paraméterek
+        self.Q = Q_diag
+        self.R = R_diag
+        self.u_min, self.u_max = [-u_bound], [u_bound]
         
-        # Setup hívás
+        self.x_min = [-20.0, -10.0, -3.14, -5.0]
+        self.x_max = [20.0, 10.0, 3.14, 5.0]
+
+        # Példányosítás és Setup
+        self.prob = TinyMPC()
         self.prob.setup(self.Ad.astype(np.float64), 
                         self.Bd.astype(np.float64), 
                         np.diag(self.Q).astype(np.float64), 
                         np.diag(self.R).astype(np.float64), 
-                        int(self.N),  # <--- Itt a trükk: ez kötelezően az 5. paraméter
+                        int(self.N), 
                         rho=0.01,
                         x_min=np.array(self.x_min).astype(np.float64), 
                         x_max=np.array(self.x_max).astype(np.float64), 
                         u_min=np.array(self.u_min).astype(np.float64), 
                         u_max=np.array(self.u_max).astype(np.float64))
         
-        self.prob.update_settings(abs_pri_tol=1e-3, abs_dua_tol=1e-3, max_iter=1000)
+        self.prob.update_settings(abs_pri_tol=1e-4, abs_dua_tol=1e-4, max_iter=1000)
 
     def solve(self, state_error, warm_start_u=None):
         self.prob.set_x0(state_error.astype(np.float64))
-        
-        # A kontroll horizont mérete N-1 (ebben az esetben 9)
         control_N = self.N - 1
         
         if warm_start_u is not None:
-            # Itt (nu x control_N) méretet küldünk, ami 1x9 lesz
             U_guess = np.tile(warm_start_u, (self.nu, control_N)).astype(np.float64) 
             self.prob.set_warm_start(U_guess)
         else:
-            # Itt is a 1x9-es nulla mátrix kell
             self.prob.set_warm_start(np.zeros((self.nu, control_N)).astype(np.float64))
         
         self.prob.solve()
         res = self.prob.get_solution()
-        
-        # Az iterációszám kiolvasása a get_info() segítségével
         iters = self.prob.get_info().iter
-        
-        # Visszaadjuk az első kormányszöget és az iterációkat
         return res.u[:, 0][0], iters
 
 # --- 3. UTILS & ADATGENERÁLÁS ---
 
-def generate_double_lane_change(v=5.0, dt=0.1, total_time=10.0):
+def generate_double_lane_change(v=10.0, dt=0.1, total_time=15.0):
     steps = int(total_time / dt)
     x_ref, y_ref = np.zeros(steps), np.zeros(steps)
     for i in range(steps):
         x_ref[i] = i * v * dt
-        if x_ref[i] < 10.0: y_ref[i] = 0.0
-        elif x_ref[i] < 20.0: y_ref[i] = 3.0
-        elif x_ref[i] < 30.0: y_ref[i] = 3.0
-        elif x_ref[i] < 40.0: y_ref[i] = 0.0
+        if x_ref[i] < 30.0: y_ref[i] = 0.0
+        elif x_ref[i] < 70.0: y_ref[i] = 3.0
+        elif x_ref[i] < 110.0: y_ref[i] = 3.0
+        elif x_ref[i] < 150.0: y_ref[i] = 0.0
         else: y_ref[i] = 0.0
-    return x_ref, gaussian_filter1d(y_ref, sigma=3.0)
+    return x_ref, gaussian_filter1d(y_ref, sigma=15.0)
+
+def generate_slalom(v=10.0, dt=0.1, total_time=15.0, amplitude=1.2, frequency=0.08):
+    """
+    Folyamatos szlalom (szinusz) pálya generálása.
+    amplitude: a kitérés mértéke méterben.
+    frequency: a szlalom sűrűsége (Hz).
+    """
+    steps = int(total_time / dt)
+    t = np.linspace(0, total_time, steps)
+    x_ref = v * t
+    y_ref = amplitude * np.sin(2 * np.pi * frequency * t)
+    
+    return x_ref, y_ref
 
 def generate_dynamic_training_data(num_samples=10000):
     print(f"🚀 {num_samples} db dinamikus minta generálása (N=10, u_horizont=9)...")
@@ -127,10 +132,11 @@ def generate_dynamic_training_data(num_samples=10000):
     
     for i in range(num_samples):
         # Véletlenszerű állapotok a tanításhoz
-        err_y = random.uniform(-3.0, 3.0)
-        err_vy = random.uniform(-1.0, 1.0)
-        err_psi = random.uniform(-0.5, 0.5)
-        err_r = random.uniform(-1.0, 1.0)
+        # A ciklusban a brutális 3.0 méter helyett reálisabb hibákat kérünk
+        err_y = random.uniform(-0.75, 0.75)  # Reális sávtartási hiba
+        err_vy = random.uniform(-0.25, 0.25)
+        err_psi = random.uniform(-0.1, 0.1)
+        err_r = random.uniform(-0.25, 0.25)
         state_err = np.array([err_y, err_vy, err_psi, err_r])
         
         # Megoldás a frissített solve függvénnyel

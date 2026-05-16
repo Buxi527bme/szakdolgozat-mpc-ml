@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import torch
 import pickle
 import time
-from data_generation import DynamicBicycleModel, generate_double_lane_change, LateralMPC
+from data_generation import DynamicBicycleModel, generate_double_lane_change, LateralMPC, generate_slalom
 from train_model import TinyMPCNet
 
 def run_ultimate_benchmark():
@@ -34,7 +34,7 @@ def run_ultimate_benchmark():
 
     # 2. Szimulációs környezet
     v_x, dt = 10.0, 0.1
-    x_ref, y_ref = generate_double_lane_change(v_x, dt, 12.0)
+    x_ref, y_ref = generate_slalom(v_x, dt, total_time=15.0, amplitude=1.2, frequency=0.08)
     
     psi_ref = np.zeros(len(x_ref))
     for i in range(len(x_ref)-1):
@@ -74,6 +74,9 @@ def run_ultimate_benchmark():
         results['warm_total_times_ms'].append((time.perf_counter() - t_start_warm) * 1000)
         results['warm_iters'].append(iter_warm)
         
+        if iter_cold == 1000 or iter_warm == 1000:
+            print(f"⚠️ FIGYELEM: Infeasible állapot a {i}. lépésnél! A jármű lesodródott.")
+
         # Fizika frissítése
         car.update(delta_warm)
 
