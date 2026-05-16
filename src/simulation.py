@@ -34,7 +34,7 @@ def run_ultimate_benchmark():
 
     # 2. Szimulációs környezet
     v_x, dt = 6.0, 0.1
-    x_ref, y_ref = generate_slalom(v_x, dt, total_time=15.0, amplitude=1.2, frequency=0.08)
+    x_ref, y_ref = generate_slalom(v_x, dt, total_time=60.0, amplitude=1.2, frequency=0.06)
     
     psi_ref = np.zeros(len(x_ref))
     for i in range(len(x_ref)-1):
@@ -56,6 +56,7 @@ def run_ultimate_benchmark():
     for i in range(len(x_ref) - 10):
         _, curr_y, _, curr_vy, curr_psi, curr_r = car.state
         state_err = np.array([curr_y - y_ref[i], curr_vy - 0.0, curr_psi - psi_ref[i], curr_r - 0.0])
+        state_err = np.clip(state_err, mpc.x_min, mpc.x_max)
         
         # --- A) HIDEGINDÍTÁS ---
         t_start_cold = time.perf_counter()

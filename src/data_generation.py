@@ -64,8 +64,8 @@ class LateralMPC:
         self.R = R_diag
         self.u_min, self.u_max = [-u_bound], [u_bound]
         
-        self.x_min = [-20.0, -10.0, -3.14, -5.0]
-        self.x_max = [20.0, 10.0, 3.14, 5.0]
+        self.x_min = [-50.0, -20.0, -6.28, -8.0]
+        self.x_max = [ 50.0,  20.0,  6.28,  8.0]
 
         self.prob = TinyMPC()
         self.prob.setup(self.Ad.astype(np.float64), 
@@ -122,6 +122,7 @@ def generate_slalom(v=10.0, dt=0.1, total_time=60.0, amplitude=1.2, frequency=0.
     t = np.linspace(0, total_time, steps)
     x_ref = v * t
     y_ref = amplitude * np.sin(2 * np.pi * frequency * t)
+    y_ref[-20:] = np.linspace(y_ref[-20], 0, 20)
     
     return x_ref, y_ref
 
@@ -145,10 +146,10 @@ def generate_dynamic_training_data(num_rollouts=10):
         for i in range(len(x_ref) - mpc.N):
             _, curr_y, _, curr_vy, curr_psi, curr_r = car.state
             state_err = np.array([
-                curr_y - y_ref[i] + np.random.normal(0, 0.05),
-                curr_vy + np.random.normal(0, 0.02),
-                curr_psi - psi_ref[i] + np.random.normal(0, 0.02),
-                curr_r + np.random.normal(0, 0.02)
+                curr_y - y_ref[i] + np.random.normal(0, 0.02),
+                curr_vy + np.random.normal(0, 0.01),
+                curr_psi - psi_ref[i] + np.random.normal(0, 0.01),
+                curr_r + np.random.normal(0, 0.01)
             ])
 
             state_err = np.clip(state_err, mpc.x_min, mpc.x_max)
@@ -172,4 +173,4 @@ def generate_dynamic_training_data(num_rollouts=10):
     print(f"✅ SIKER! {len(df)} minta elmentve: {file_path}")
 
 if __name__ == "__main__":
-    generate_dynamic_training_data(num_rollouts=10)
+    generate_dynamic_training_data(num_rollouts=15)
