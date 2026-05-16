@@ -33,7 +33,7 @@ def run_ultimate_benchmark():
         return (x @ w3.T + b3)[0]               # Kimenet
 
     # 2. Szimulációs környezet
-    v_x, dt = 10.0, 0.1
+    v_x, dt = 6.0, 0.1
     x_ref, y_ref = generate_slalom(v_x, dt, total_time=15.0, amplitude=1.2, frequency=0.08)
     
     psi_ref = np.zeros(len(x_ref))
@@ -51,33 +51,41 @@ def run_ultimate_benchmark():
 
     print("🏁 Szimuláció futtatása a pályán...")
 
+    prev_U = None
+
     for i in range(len(x_ref) - 10):
         _, curr_y, _, curr_vy, curr_psi, curr_r = car.state
         state_err = np.array([curr_y - y_ref[i], curr_vy - 0.0, curr_psi - psi_ref[i], curr_r - 0.0])
         
-        # --- A) HIDEGINDÍTÁS (TinyMPC magában) ---
+        # --- A) HIDEGINDÍTÁS ---
         t_start_cold = time.perf_counter()
-        _, iter_cold = mpc.solve(state_err, warm_start_u=None)
+        _, iter_cold, _ = mpc.solve(state_err, warm_start_U=None)
         results['cold_times_ms'].append((time.perf_counter() - t_start_cold) * 1000)
         results['cold_iters'].append(iter_cold)
         
-        # --- B) MELEGINDÍTÁS (NumPy AI + TinyMPC) ---
+        # --- B) MELEGINDÍTÁS ---
         t_start_warm = time.perf_counter()
-        
-        # 1. Villámgyors AI tipp
         in_scaled = scaler.transform([state_err])[0]
         ai_delta = fast_numpy_inference(in_scaled)
         
-        # 2. Meghekkelt TinyMPC futtatása a tippel
-        delta_warm, iter_warm = mpc.solve(state_err, warm_start_u=ai_delta)
+        if prev_U is None:
+            U_warm = np.zeros((mpc.nu, mpc.N - 1))
+        else:
+            # előző optimális U eltolása
+            U_warm = np.hstack([prev_U[:, 1:], prev_U[:, -1:]])
+        
+        # AI tipp az első elemre
+        U_warm[0, 0] = ai_delta
+        
+        delta_warm, iter_warm, U_sol = mpc.solve(state_err, warm_start_U=U_warm)
+        prev_U = U_sol
         
         results['warm_total_times_ms'].append((time.perf_counter() - t_start_warm) * 1000)
         results['warm_iters'].append(iter_warm)
         
         if iter_cold == 1000 or iter_warm == 1000:
             print(f"⚠️ FIGYELEM: Infeasible állapot a {i}. lépésnél! A jármű lesodródott.")
-
-        # Fizika frissítése
+        
         car.update(delta_warm)
 
     # 3. Kiértékelés (első 5 lépés levágása a tranziens miatt)
