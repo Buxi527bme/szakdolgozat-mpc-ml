@@ -10,3 +10,10 @@ env/
 data/
 models/
 *.csv
+
+results/
+*.png
+*.jpg
+metrics.json
+grid_master_summary*.csv
+config_override.json

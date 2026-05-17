@@ -10,6 +10,7 @@ from data_generation import DynamicBicycleModel, generate_double_lane_change, La
 from train_model import TinyMPCNet
 from config_loader import load_config
 
+
 def run_ultimate_benchmark():
     print("🚀 Ultimate TinyMPC + NumPy AI Warm-start Benchmark indítása...")
     cfg = load_config()
@@ -121,25 +122,50 @@ def run_ultimate_benchmark():
     avg_c_iter, avg_w_iter = np.mean(f_cold_iter), np.mean(f_warm_iter)
     avg_c_time, avg_w_time = np.mean(f_cold_time), np.mean(f_warm_time)
 
+    # ... a futás vége után (avg_c_iter, avg_w_iter, avg_c_time, avg_w_time már megvan)
+
+    results_dir = os.path.join(os.path.dirname(__file__), "..", "results")
+    os.makedirs(results_dir, exist_ok=True)
+
+    # paraméterekből rövid, stabil név
+    tag = f"N{cfg['N']}_rho{cfg['rho']}_freq{cfg['frequency']}_vx{cfg['v_x']}_dt{cfg['dt']}"
+    timestamp = int(time.time())
+
+    summary = {
+        "params": cfg,
+        "avg_c_iter": float(avg_c_iter),
+        "avg_w_iter": float(avg_w_iter),
+        "avg_c_time": float(avg_c_time),
+        "avg_w_time": float(avg_w_time)
+    }
+
+    json_path = os.path.join(results_dir, f"results_{tag}_{timestamp}.json")
+    with open(json_path, "w") as f:
+        json.dump(summary, f, indent=2)
+
+    # ha akarod a PNG is paraméterezett néven
+    # png_path = os.path.join(results_dir, f"plot_{tag}_{timestamp}.png")
+    # plt.savefig(png_path, dpi=300)
+
     print(f"\n🏆 --- VÉGSŐ TINYMPC BENCHMARK EREDMÉNYEK ---")
     print(f"Átlagos iteráció (Hideg): {avg_c_iter:.1f}")
     print(f"Átlagos iteráció (Meleg): {avg_w_iter:.1f}  --> JAVULÁS: {((avg_c_iter-avg_w_iter)/avg_c_iter)*100:.1f}%")
     print(f"Átlagos Futási Idő (Hideg): {avg_c_time:.3f} ms")
     print(f"Átlagos Futási Idő (NumPy AI + Meleg): {avg_w_time:.3f} ms --> JAVULÁS: {((avg_c_time-avg_w_time)/avg_c_time)*100:.1f}%")
 
-    os.makedirs("results", exist_ok=True)
-    results_payload = {
-        "cfg": cfg,
-        "avg_cold_iter": float(avg_c_iter),
-        "avg_warm_iter": float(avg_w_iter),
-        "avg_cold_time_ms": float(avg_c_time),
-        "avg_warm_time_ms": float(avg_w_time),
-    }
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_path = f"results/results_{timestamp}.json"
-    with open(results_path, "w", encoding="utf-8") as f:
-        json.dump(results_payload, f, indent=2)
-    print(f"✅ Eredmények mentve: {results_path}")
+    #os.makedirs("results", exist_ok=True)
+    #results_payload = {
+    #    "cfg": cfg,
+    #    "avg_cold_iter": float(avg_c_iter),
+    #    "avg_warm_iter": float(avg_w_iter),
+    #    "avg_cold_time_ms": float(avg_c_time),
+    #    "avg_warm_time_ms": float(avg_w_time),
+    #}
+    #timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    #results_path = f"results/results_{timestamp}.json"
+    #with open(results_path, "w", encoding="utf-8") as f:
+    #    json.dump(results_payload, f, indent=2)
+    #print(f"✅ Eredmények mentve: {results_path}")
 
     # Grafikonok rajzolása a szakdolgozathoz
     plt.figure(figsize=(12, 5))
@@ -159,8 +185,31 @@ def run_ultimate_benchmark():
     plt.grid(axis='y', linestyle='--')
     
     plt.tight_layout()
-    plt.savefig('eredmeny_tinympc_vegszo.png', dpi=300)
-    plt.show()
+    png_path = os.path.join(results_dir, f"plot_{tag}_{timestamp}.png")
+    plt.savefig(png_path, dpi=300)
+
+    
+    # Kiszámoljuk a legfontosabb sarokszámokat
+    max_c_iter = int(np.max(f_cold_iter))
+    
+    # ÚJ: Megszámoljuk, pontosan hányszor szállt el a solver 1000 iterációig
+    cap_count = int(np.sum(np.array(f_cold_iter) == 1000))
+    
+    metrics = {
+        "max_cold_iter": max_c_iter,
+        "cap_count": cap_count,          # Hányszor omlott össze?
+        "avg_cold_iter": round(float(avg_c_iter), 2),
+        "avg_warm_iter": round(float(avg_w_iter), 2),
+        "avg_cold_time_ms": round(float(avg_c_time), 3),
+        "avg_warm_time_ms": round(float(avg_w_time), 3)
+    }
+    
+    with open('metrics.json', 'w') as f:
+        json.dump(metrics, f)
+
+    plt.show(block=False)
+    plt.pause(1)   # 2 másodpercig mutatja
+    plt.close('all')
 
 if __name__ == "__main__":
     run_ultimate_benchmark()
