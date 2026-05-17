@@ -3,11 +3,16 @@ import matplotlib.pyplot as plt
 import torch
 import pickle
 import time
+import os
+import json
+from datetime import datetime
 from data_generation import DynamicBicycleModel, generate_double_lane_change, LateralMPC, generate_slalom
 from train_model import TinyMPCNet
+from config_loader import load_config
 
 def run_ultimate_benchmark():
     print("🚀 Ultimate TinyMPC + NumPy AI Warm-start Benchmark indítása...")
+    cfg = load_config()
     
     # 1. AI Modell betöltése
     device = torch.device("cpu") # Most szándékosan CPU-t használunk a memóriamásolás elkerülésére
@@ -33,8 +38,14 @@ def run_ultimate_benchmark():
         return (x @ w3.T + b3)[0]               # Kimenet
 
     # 2. Szimulációs környezet
-    v_x, dt = 6.0, 0.1
-    x_ref, y_ref = generate_slalom(v_x, dt, total_time=60.0, amplitude=1.2, frequency=0.06)
+    v_x, dt = cfg["v_x"], cfg["dt"]
+    x_ref, y_ref = generate_slalom(
+        v_x,
+        dt,
+        total_time=cfg["total_time"],
+        amplitude=cfg["amplitude"],
+        frequency=cfg["frequency"],
+    )
     
     psi_ref = np.zeros(len(x_ref))
     for i in range(len(x_ref)-1):
@@ -42,7 +53,19 @@ def run_ultimate_benchmark():
     
     car = DynamicBicycleModel(dt=dt)
     car.set_state(x_ref[0], y_ref[0], v_x, 0.0, psi_ref[0], 0.0)
-    mpc = LateralMPC(N_horizon=10, dt=dt)
+    mpc = LateralMPC(
+        N_horizon=cfg["N"],
+        dt=dt,
+        v_x=cfg["v_x"],
+        Q_diag=cfg["Q_diag"],
+        R_diag=cfg["R_diag"],
+        u_bound=cfg["u_bound"],
+        rho=cfg["rho"],
+        abs_pri_tol=cfg["abs_pri_tol"],
+        abs_dua_tol=cfg["abs_dua_tol"],
+        x_min=cfg["x_min"],
+        x_max=cfg["x_max"],
+    )
     
     results = {
         'cold_iters': [], 'warm_iters': [], 
@@ -53,7 +76,7 @@ def run_ultimate_benchmark():
 
     prev_U = None
 
-    for i in range(len(x_ref) - 10):
+    for i in range(len(x_ref) - mpc.N):
         _, curr_y, _, curr_vy, curr_psi, curr_r = car.state
         state_err = np.array([curr_y - y_ref[i], curr_vy - 0.0, curr_psi - psi_ref[i], curr_r - 0.0])
         state_err = np.clip(state_err, mpc.x_min, mpc.x_max)
@@ -103,6 +126,20 @@ def run_ultimate_benchmark():
     print(f"Átlagos iteráció (Meleg): {avg_w_iter:.1f}  --> JAVULÁS: {((avg_c_iter-avg_w_iter)/avg_c_iter)*100:.1f}%")
     print(f"Átlagos Futási Idő (Hideg): {avg_c_time:.3f} ms")
     print(f"Átlagos Futási Idő (NumPy AI + Meleg): {avg_w_time:.3f} ms --> JAVULÁS: {((avg_c_time-avg_w_time)/avg_c_time)*100:.1f}%")
+
+    os.makedirs("results", exist_ok=True)
+    results_payload = {
+        "cfg": cfg,
+        "avg_cold_iter": float(avg_c_iter),
+        "avg_warm_iter": float(avg_w_iter),
+        "avg_cold_time_ms": float(avg_c_time),
+        "avg_warm_time_ms": float(avg_w_time),
+    }
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_path = f"results/results_{timestamp}.json"
+    with open(results_path, "w", encoding="utf-8") as f:
+        json.dump(results_payload, f, indent=2)
+    print(f"✅ Eredmények mentve: {results_path}")
 
     # Grafikonok rajzolása a szakdolgozathoz
     plt.figure(figsize=(12, 5))

@@ -6,6 +6,7 @@ import random
 from scipy.ndimage import gaussian_filter1d
 import tinympc
 from tinympc import TinyMPC  # Biztosítjuk a helyes importot
+from config_loader import load_config
 
 # --- 1. MODELLEK ---
 
@@ -41,13 +42,25 @@ class DynamicBicycleModel:
 # --- 2. SOLVER (LateralMPC definíciója) ---
 
 class LateralMPC:
-    def __init__(self, N_horizon=10, dt=0.1, Q_diag=[20.0, 0.1, 4.0, 0.1], R_diag=[0.25], u_bound=0.8):
+    def __init__(
+        self,
+        N_horizon=10,
+        dt=0.1,
+        v_x=6.0,
+        Q_diag=[20.0, 0.1, 4.0, 0.1],
+        R_diag=[0.25],
+        u_bound=0.8,
+        rho=0.3,
+        abs_pri_tol=1e-3,
+        abs_dua_tol=1e-3,
+        x_min=[-50.0, -20.0, -6.28, -8.0],
+        x_max=[50.0, 20.0, 6.28, 8.0],
+    ):
         self.N, self.dt = N_horizon, dt
         self.nx, self.nu = 4, 1
         
         # Jármű paraméterek
         m, Iz, lf, lr, Cf, Cr = 1500.0, 3000.0, 1.2, 1.3, 50000.0, 50000.0
-        v_x = 6.0
         
         Ac = np.array([
             [0, 1, 0, 0],
@@ -60,12 +73,12 @@ class LateralMPC:
         self.Ad = np.eye(4) + Ac * self.dt
         self.Bd = Bc * self.dt
         
-        self.Q = Q_diag
-        self.R = R_diag
+        self.Q = list(Q_diag)
+        self.R = list(R_diag)
         self.u_min, self.u_max = [-u_bound], [u_bound]
         
-        self.x_min = [-50.0, -20.0, -6.28, -8.0]
-        self.x_max = [ 50.0,  20.0,  6.28,  8.0]
+        self.x_min = list(x_min)
+        self.x_max = list(x_max)
 
         self.prob = TinyMPC()
         self.prob.setup(self.Ad.astype(np.float64), 
@@ -73,13 +86,13 @@ class LateralMPC:
                         np.diag(self.Q).astype(np.float64), 
                         np.diag(self.R).astype(np.float64), 
                         int(self.N), 
-                        rho=0.3,  # <-- stabilabb, mint 0.01
+                        rho=rho,  # <-- stabilabb, mint 0.01
                         x_min=np.array(self.x_min).astype(np.float64), 
                         x_max=np.array(self.x_max).astype(np.float64), 
                         u_min=np.array(self.u_min).astype(np.float64), 
                         u_max=np.array(self.u_max).astype(np.float64))
         
-        self.prob.update_settings(abs_pri_tol=1e-3, abs_dua_tol=1e-3, max_iter=1000)
+        self.prob.update_settings(abs_pri_tol=abs_pri_tol, abs_dua_tol=abs_dua_tol, max_iter=1000)
 
     def solve(self, state_error, warm_start_U=None):
         self.prob.set_x0(state_error.astype(np.float64))
@@ -127,11 +140,30 @@ def generate_slalom(v=10.0, dt=0.1, total_time=60.0, amplitude=1.2, frequency=0.
     return x_ref, y_ref
 
 def generate_dynamic_training_data(num_rollouts=10):
-    print(f"🚀 Rollout alapú adatgenerálás (N=10)...")
-    mpc = LateralMPC(N_horizon=10, dt=0.1)
+    cfg = load_config()
+    print(f"🚀 Rollout alapú adatgenerálás (N={cfg['N']})...")
+    mpc = LateralMPC(
+        N_horizon=cfg["N"],
+        dt=cfg["dt"],
+        v_x=cfg["v_x"],
+        Q_diag=cfg["Q_diag"],
+        R_diag=cfg["R_diag"],
+        u_bound=cfg["u_bound"],
+        rho=cfg["rho"],
+        abs_pri_tol=cfg["abs_pri_tol"],
+        abs_dua_tol=cfg["abs_dua_tol"],
+        x_min=cfg["x_min"],
+        x_max=cfg["x_max"],
+    )
 
-    v_x, dt = 6.0, 0.1
-    x_ref, y_ref = generate_slalom(v_x, dt, total_time=60.0, amplitude=1.2, frequency=0.06)
+    v_x, dt = cfg["v_x"], cfg["dt"]
+    x_ref, y_ref = generate_slalom(
+        v_x,
+        dt,
+        total_time=cfg["total_time"],
+        amplitude=cfg["amplitude"],
+        frequency=cfg["frequency"],
+    )
 
     psi_ref = np.zeros(len(x_ref))
     for i in range(len(x_ref) - 1):
