@@ -8,7 +8,7 @@ import pandas as pd
 
 ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
 OVERRIDE_PATH = os.path.join(ROOT_DIR, "src", "config_override.json")
-METRICS_PATH = os.path.join(ROOT_DIR, "metrics.json") # Ide várjuk a szimuláció eredményét
+METRICS_PATH = os.path.join(ROOT_DIR, "metrics.json") 
 
 def _load_grid(grid_path=None):
     if grid_path is None:
@@ -48,30 +48,26 @@ def run_sweep(grid_path=None):
             print(f"\n🔁 Sweep run {run_idx}: {override}")
             _write_override(override)
             
-            # Töröljük a régi metrikát, hogy ne olvassunk be fals adatot
             if os.path.exists(METRICS_PATH):
                 os.remove(METRICS_PATH)
                 
             _run_pipeline()
             
-            # Sikeres futás után beolvassuk a friss metrikákat
             if os.path.exists(METRICS_PATH):
                 with open(METRICS_PATH, "r", encoding="utf-8") as f:
                     metrics = json.load(f)
                 
-                # Összefésüljük a paramétereket az eredményekkel
                 run_summary = {**override, **metrics}
                 master_results.append(run_summary)
                 
-                # CSV frissítése minden iteráció után (biztonsági mentés)
                 df = pd.DataFrame(master_results)
                 df.to_csv("grid_master_summary.csv", index=False)
             else:
-                print(f"⚠️ HIBA: A simulation.py nem hozta létre a metrics.json-t a {run_idx}. körben!")
+                print(f"A simulation.py nem hozta létre a metrics.json-t a {run_idx}. körben!")
                 
     finally:
         _write_override({})
-        print("\n🏆 Grid Search befejezve! Eredmények: grid_master_summary.csv")
+        print("\nGrid Search befejezve! Eredmények: grid_master_summary.csv")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run config sweep for MPC pipeline.")

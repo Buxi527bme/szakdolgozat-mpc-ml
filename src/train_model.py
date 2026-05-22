@@ -8,7 +8,6 @@ from sklearn.preprocessing import StandardScaler
 import os
 import pickle
 
-# --- 1. A Dinamikus Modellhez igazított Hálózat ---
 class TinyMPCNet(nn.Module):
     def __init__(self):
         super(TinyMPCNet, self).__init__()
@@ -28,7 +27,6 @@ def train():
     print("Dinamikus adatok betöltése...")
     df = pd.read_csv('data/mpc_dynamic_dataset.csv')
     
-    # Bemenetek: e_y, e_vy, e_psi, e_r | Kimenet: delta
     X = df[['e_y', 'e_vy', 'e_psi', 'e_r']].values
     y = df[['delta']].values
     
@@ -55,8 +53,8 @@ def train():
     X_test_tensor, y_test_tensor = X_test_tensor.to(device), y_test_tensor.to(device)
     
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.005) # Kicsit finomabb tanulási ráta
-    epochs = 300 # Több epoch a bonyolultabb adatokhoz
+    optimizer = optim.Adam(model.parameters(), lr=0.005) 
+    epochs = 300 
     
     print("Tanítás indítása...")
     for epoch in range(epochs):

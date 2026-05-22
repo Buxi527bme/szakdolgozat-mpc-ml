@@ -5,11 +5,8 @@ import os
 import random
 from scipy.ndimage import gaussian_filter1d
 import tinympc
-from tinympc import TinyMPC  # Biztosítjuk a helyes importot
+from tinympc import TinyMPC 
 from config_loader import load_config
-
-# --- 1. MODELLEK ---
-
 class DynamicBicycleModel:
     def __init__(self, dt=0.1):
         self.dt = dt
@@ -38,9 +35,6 @@ class DynamicBicycleModel:
             r + r_dot * self.dt
         ])
         return self.state
-
-# --- 2. SOLVER (LateralMPC definíciója) ---
-
 class LateralMPC:
     def __init__(
         self,
@@ -59,7 +53,6 @@ class LateralMPC:
         self.N, self.dt = N_horizon, dt
         self.nx, self.nu = 4, 1
         
-        # Jármű paraméterek
         m, Iz, lf, lr, Cf, Cr = 1500.0, 3000.0, 1.2, 1.3, 50000.0, 50000.0
         
         Ac = np.array([
@@ -111,8 +104,6 @@ class LateralMPC:
         iters = self.prob.get_info().iter
         return res.u[:, 0][0], iters, res.u
 
-# --- 3. UTILS & ADATGENERÁLÁS ---
-
 def generate_double_lane_change(v=10.0, dt=0.1, total_time=15.0):
     steps = int(total_time / dt)
     x_ref, y_ref = np.zeros(steps), np.zeros(steps)
@@ -127,7 +118,7 @@ def generate_double_lane_change(v=10.0, dt=0.1, total_time=15.0):
 
 def generate_slalom(v=10.0, dt=0.1, total_time=60.0, amplitude=1.2, frequency=0.06):
     """
-    Folyamatos szlalom (szinusz) pálya generálása.
+    Folyamatos szlalom pálya generálása.
     amplitude: a kitérés mértéke méterben.
     frequency: a szlalom sűrűsége (Hz).
     """
@@ -141,7 +132,7 @@ def generate_slalom(v=10.0, dt=0.1, total_time=60.0, amplitude=1.2, frequency=0.
 
 def generate_dynamic_training_data(num_rollouts=10):
     cfg = load_config()
-    print(f"🚀 Rollout alapú adatgenerálás (N={cfg['N']})...")
+    print(f"Rollout alapú adatgenerálás (N={cfg['N']})...")
     mpc = LateralMPC(
         N_horizon=cfg["N"],
         dt=cfg["dt"],
@@ -196,13 +187,13 @@ def generate_dynamic_training_data(num_rollouts=10):
 
             car.update(delta)
 
-        print(f"✅ rollout {rollout+1}/{num_rollouts} kész")
+        print(f"rollout {rollout+1}/{num_rollouts} kész")
 
     os.makedirs('data', exist_ok=True)
     df = pd.DataFrame(data)
     file_path = 'data/mpc_dynamic_dataset.csv'
     df.to_csv(file_path, index=False)
-    print(f"✅ SIKER! {len(df)} minta elmentve: {file_path}")
+    print(f"Siker! {len(df)} minta elmentve: {file_path}")
 
 if __name__ == "__main__":
     generate_dynamic_training_data(num_rollouts=15)
