@@ -13,11 +13,11 @@ class TinyMPCNet(nn.Module):
         super(TinyMPCNet, self).__init__()
         # 4 bemenet -> 32 neuron -> 32 neuron -> 1 kimenet
         self.network = nn.Sequential(
-            nn.Linear(4, 32),
+            nn.Linear(4, 16),
             nn.ReLU(),
-            nn.Linear(32, 32),
+            nn.Linear(16, 16),
             nn.ReLU(),
-            nn.Linear(32, 1)
+            nn.Linear(16, 1)
         )
 
     def forward(self, x):

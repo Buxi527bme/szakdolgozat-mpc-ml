@@ -133,7 +133,7 @@ def run_ultimate_benchmark():
         json.dump(summary, f, indent=2)
 
 
-    print(f"\n🏆 --- VÉGSŐ TINYMPC BENCHMARK EREDMÉNYEK ---")
+    print(f"\n--- VÉGSŐ TINYMPC BENCHMARK EREDMÉNYEK ---")
     print(f"Átlagos iteráció (Hideg): {avg_c_iter:.1f}")
     print(f"Átlagos iteráció (Meleg): {avg_w_iter:.1f}  --> JAVULÁS: {((avg_c_iter-avg_w_iter)/avg_c_iter)*100:.1f}%")
     print(f"Átlagos Futási Idő (Hideg): {avg_c_time:.3f} ms")
@@ -176,7 +176,7 @@ def run_ultimate_benchmark():
         json.dump(metrics, f)
 
     plt.show(block=False)
-    plt.pause(1)  
+    plt.pause(10)  
     plt.close('all')
 
 if __name__ == "__main__":
