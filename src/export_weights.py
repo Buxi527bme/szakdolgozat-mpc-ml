@@ -1,42 +1,32 @@
 import torch
+from train_model import TinyMPCNet
 import numpy as np
 
-# Feltételezzük, hogy a modelled egy egyszerű MLP:
-# Bemenet (4 állapot) -> Rejtett réteg (32 neuron, ReLU) -> Kimenet (9 kontroll lépés)
-def export_to_c_header(model_path, output_header_path):
-    # Modell betöltése (ha egyedi osztályod van, azt példányosítsd előtte)
-    model = torch.load(model_path)
-    model.eval()
-    
-    state_dict = model.state_dict()
-    
-    with open(output_header_path, 'w') as f:
-        f.write("#ifndef TINYMPC_NN_WEIGHTS_H\n")
-        f.write("#define TINYMPC_NN_WEIGHTS_H\n\n")
-        
-        # Végigmegyünk a rétegeken
-        layer_idx = 1
-        for name, param in state_dict.items():
-            param_np = param.detach().cpu().numpy()
-            
-            # Mátrix kiterítése 1D tömbbé (C-kompatibilis sorfolytonos tárolás)
-            flat_data = param_np.flatten()
-            array_str = ", ".join([f"{val:.6f}f" for val in flat_data])
-            
-            if "weight" in name:
-                rows, cols = param_np.shape
-                f.write(f"// Layer {layer_idx} Weights: {rows}x{cols}\n")
-                f.write(f"const float W{layer_idx}[{rows * cols}] = {{{array_str}}};\n\n")
-            
-            elif "bias" in name:
-                size = param_np.shape[0]
-                f.write(f"// Layer {layer_idx} Biases: {size}\n")
-                f.write(f"const float b{layer_idx}[{size}] = {{{array_str}}};\n\n")
-                layer_idx += 1
-                
-        f.write("#endif // TINYMPC_NN_WEIGHTS_H\n")
-        
-    print(f"Sikeres exportálás: {output_header_path}")
+# Modell betöltése
+device = torch.device("cpu")
+model = TinyMPCNet()
+model.load_state_dict(torch.load('models/tinympc_ai_weights.pth', map_location=device, weights_only=True))
+model.eval()
 
-# Futtatás:
-# export_to_c_header('betanitott_tinympc_net.pth', 'weights.h')
+def export_to_header(model, filename="src/model_weights.h"):
+    with open(filename, "w") as f:
+        f.write("#pragma once\n\n")
+        f.write("#include <vector>\n\n")
+        
+        # Súlyok kinyerése
+        for i, layer in enumerate([l for l in model.network if hasattr(l, 'weight')]):
+            w = layer.weight.detach().numpy()
+            b = layer.bias.detach().numpy()
+            
+            f.write(f"// Layer {i} weights and biases\n")
+            f.write(f"const std::vector<float> W{i} = {{")
+            f.write(", ".join(map(str, w.flatten())))
+            f.write("};\n\n")
+            
+            f.write(f"const std::vector<float> B{i} = {{")
+            f.write(", ".join(map(str, b.flatten())))
+            f.write("};\n\n")
+            
+    print(f"Súlyok sikeresen exportálva ebbe: {filename}")
+
+export_to_header(model)
