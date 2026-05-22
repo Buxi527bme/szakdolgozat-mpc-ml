@@ -11,13 +11,15 @@ import pickle
 class TinyMPCNet(nn.Module):
     def __init__(self):
         super(TinyMPCNet, self).__init__()
-        # 4 bemenet -> 32 neuron -> 32 neuron -> 1 kimenet
+        # 4 bemenet -> 16 neuron -> 16 neuron -> 10 kimenet (1 delta + 9 dual változó)
         self.network = nn.Sequential(
-            nn.Linear(4, 16),
+            nn.Linear(4, 64),
             nn.ReLU(),
-            nn.Linear(16, 16),
+            nn.Linear(64, 64),
             nn.ReLU(),
-            nn.Linear(16, 1)
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 10)
         )
 
     def forward(self, x):
@@ -28,7 +30,10 @@ def train():
     df = pd.read_csv('data/mpc_dynamic_dataset.csv')
     
     X = df[['e_y', 'e_vy', 'e_psi', 'e_r']].values
-    y = df[['delta']].values
+    
+    # Kinyerjük a 'delta' oszlopot ÉS a 9 darab 'y_...' oszlopot
+    target_cols = ['delta'] + [f'y_{i}' for i in range(9)]
+    y = df[target_cols].values  # <--- EZ VÁLTOZOTT! Most 10 célváltozónk van.
     
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
@@ -52,6 +57,8 @@ def train():
     X_train_tensor, y_train_tensor = X_train_tensor.to(device), y_train_tensor.to(device)
     X_test_tensor, y_test_tensor = X_test_tensor.to(device), y_test_tensor.to(device)
     
+    # A Mean Squared Error tökéletes ide, mert egyszerre fogja büntetni 
+    # a kormányszög és a dual változók tévesztését is!
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.005) 
     epochs = 300 
@@ -74,7 +81,7 @@ def train():
             print(f"Epoch {epoch+1}/{epochs} | Train Loss: {loss.item():.6f} | Test Loss: {test_loss.item():.6f}")
             
     torch.save(model.state_dict(), 'models/tinympc_ai_weights.pth')
-    print("Tanítás kész! A modell már a dinamikus összefüggéseket használja.")
+    print("Tanítás kész! A modell most már a belső állapotokat is megérti.")
 
 if __name__ == "__main__":
     train()

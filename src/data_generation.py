@@ -87,10 +87,11 @@ class LateralMPC:
         
         self.prob.update_settings(abs_pri_tol=abs_pri_tol, abs_dua_tol=abs_dua_tol, max_iter=1000)
 
-    def solve(self, state_error, warm_start_U=None):
+    def solve(self, state_error, warm_start_U=None, warm_start_Y=None):
         self.prob.set_x0(state_error.astype(np.float64))
         control_N = self.N - 1
         
+        # 1. Primal (Kormányszög) melegindítás
         if warm_start_U is None:
             U_guess = np.zeros((self.nu, control_N), dtype=np.float64)
         else:
@@ -99,11 +100,22 @@ class LateralMPC:
                 raise ValueError(f"warm_start_U shape mismatch: {U_guess.shape} != ({self.nu}, {control_N})")
         
         self.prob.set_warm_start(U_guess)
+
+        # 2. Dual (Lagrange-szorzók) melegindítás - EZT FOGJA HASZNÁLNI AZ AI!
+        if warm_start_Y is not None:
+            Y_guess = np.asarray(warm_start_Y, dtype=np.float64)
+            self.prob.set_warm_start_dual(Y_guess)
+
+        # Megoldás
         self.prob.solve()
         res = self.prob.get_solution()
         iters = self.prob.get_info().iter
-        return res.u[:, 0][0], iters, res.u
+        
+        # 3. Kiolvassuk a memóriából a tökéletes dual állapotokat az adatgeneráláshoz
+        y_matrix = self.prob.get_y()
 
+        # Visszaadjuk az y_matrix-ot is a negyedik helyen!
+        return res.u[:, 0][0], iters, res.u, y_matrix
 def generate_double_lane_change(v=10.0, dt=0.1, total_time=15.0):
     steps = int(total_time / dt)
     x_ref, y_ref = np.zeros(steps), np.zeros(steps)
@@ -166,8 +178,11 @@ def generate_dynamic_training_data(num_rollouts=10):
         car = DynamicBicycleModel(dt=dt)
         car.set_state(x_ref[0], y_ref[0], v_x, 0.0, psi_ref[0], 0.0)
 
+        # EZ A BELSŐ CIKLUS HIÁNYZOTT:
         for i in range(len(x_ref) - mpc.N):
             _, curr_y, _, curr_vy, curr_psi, curr_r = car.state
+            
+            # Kiszámoljuk az állapothibát (ez is eltűnt a képeden)
             state_err = np.array([
                 curr_y - y_ref[i] + np.random.normal(0, 0.02),
                 curr_vy + np.random.normal(0, 0.01),
@@ -177,13 +192,23 @@ def generate_dynamic_training_data(num_rollouts=10):
 
             state_err = np.clip(state_err, mpc.x_min, mpc.x_max)
 
-            delta, iters, _ = mpc.solve(state_err)
+            # Most már 4 változót várunk a solve-tól!
+            delta, iters, _, y_matrix = mpc.solve(state_err)
 
-            data.append({
+            # Kilapítjuk a mátrixot (4x10 -> 40 elemű vektor)
+            y_flat = np.array(y_matrix).flatten()
+
+            row_data = {
                 'e_y': state_err[0], 'e_vy': state_err[1],
                 'e_psi': state_err[2], 'e_r': state_err[3],
                 'delta': delta
-            })
+            }
+
+            # Dinamikusan hozzáadjuk mind a 40 y értéket (y_0, y_1 ... y_39)
+            for j, y_val in enumerate(y_flat):
+                row_data[f'y_{j}'] = y_val
+
+            data.append(row_data)
 
             car.update(delta)
 

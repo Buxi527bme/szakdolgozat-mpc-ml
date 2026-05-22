@@ -12,7 +12,7 @@ from config_loader import load_config
 
 
 def run_ultimate_benchmark():
-    print("TinyMPC + NumPy AI Warm-start Benchmark indítása...")
+    print("TinyMPC + NumPy AI Dual Warm-start Benchmark indítása...")
     cfg = load_config()
     
 
@@ -24,17 +24,21 @@ def run_ultimate_benchmark():
     with open('models/scaler.pkl', 'rb') as f:
         scaler = pickle.load(f)
         
+    # Súlyok kinyerése a 4 rétegű (64-64-32-10) hálózatból
     w1 = model.network[0].weight.detach().numpy()
     b1 = model.network[0].bias.detach().numpy()
     w2 = model.network[2].weight.detach().numpy()
     b2 = model.network[2].bias.detach().numpy()
     w3 = model.network[4].weight.detach().numpy()
     b3 = model.network[4].bias.detach().numpy()
+    w4 = model.network[6].weight.detach().numpy() 
+    b4 = model.network[6].bias.detach().numpy()
 
     def fast_numpy_inference(x_scaled):
         x = np.maximum(0, x_scaled @ w1.T + b1) 
         x = np.maximum(0, x @ w2.T + b2)        
-        return (x @ w3.T + b3)[0]               
+        x = np.maximum(0, x @ w3.T + b3)
+        return (x @ w4.T + b4) # <-- 10 elemet ad vissza, [0] NÉLKÜL!
 
     v_x, dt = cfg["v_x"], cfg["dt"]
     x_ref, y_ref = generate_slalom(
@@ -80,14 +84,25 @@ def run_ultimate_benchmark():
         state_err = np.clip(state_err, mpc.x_min, mpc.x_max)
         
         t_start_cold = time.perf_counter()
-        _, iter_cold, _ = mpc.solve(state_err, warm_start_U=None)
+        
+        # 1. HIDEGINDÍTÁS (4 paraméterbe csomagoljuk ki az új solve miatt!)
+        _, iter_cold, _, _ = mpc.solve(state_err, warm_start_U=None)
+        
         results['cold_times_ms'].append((time.perf_counter() - t_start_cold) * 1000)
         results['cold_iters'].append(iter_cold)
         
         t_start_warm = time.perf_counter()
-        in_scaled = scaler.transform([state_err])[0]
-        ai_delta = fast_numpy_inference(in_scaled)
         
+        # 2. AI KÖVETKEZTETÉS (Gyors Numpy művelet)
+        in_scaled = scaler.transform([state_err])[0]
+        ai_preds = fast_numpy_inference(in_scaled)
+        
+        # Szétválasztjuk a 10 elemet: 1 kormányszög, 9 dual változó
+        ai_delta = ai_preds[0]
+        # (1,9) formátumra alakítjuk (sormátrix), ahogy a C++ Eigen elvárja
+        ai_y = ai_preds[1:10].reshape(1, 9)
+        
+        # Primal warm start felépítése
         if prev_U is None:
             U_warm = np.zeros((mpc.nu, mpc.N - 1))
         else:
@@ -95,7 +110,9 @@ def run_ultimate_benchmark():
         
         U_warm[0, 0] = ai_delta
         
-        delta_warm, iter_warm, U_sol = mpc.solve(state_err, warm_start_U=U_warm)
+        # 3. MELEGINDÍTÁS (Átadjuk az U-t ÉS az Y-t is!)
+        delta_warm, iter_warm, U_sol, _ = mpc.solve(state_err, warm_start_U=U_warm, warm_start_Y=ai_y)
+        
         prev_U = U_sol
         
         results['warm_total_times_ms'].append((time.perf_counter() - t_start_warm) * 1000)
@@ -135,7 +152,7 @@ def run_ultimate_benchmark():
 
     print(f"\n--- VÉGSŐ TINYMPC BENCHMARK EREDMÉNYEK ---")
     print(f"Átlagos iteráció (Hideg): {avg_c_iter:.1f}")
-    print(f"Átlagos iteráció (Meleg): {avg_w_iter:.1f}  --> JAVULÁS: {((avg_c_iter-avg_w_iter)/avg_c_iter)*100:.1f}%")
+    print(f"Átlagos iteráció (AI + Dual Meleg): {avg_w_iter:.1f}  --> JAVULÁS: {((avg_c_iter-avg_w_iter)/avg_c_iter)*100:.1f}%")
     print(f"Átlagos Futási Idő (Hideg): {avg_c_time:.3f} ms")
     print(f"Átlagos Futási Idő (NumPy AI + Meleg): {avg_w_time:.3f} ms --> JAVULÁS: {((avg_c_time-avg_w_time)/avg_c_time)*100:.1f}%")
 
@@ -143,14 +160,14 @@ def run_ultimate_benchmark():
     
     plt.subplot(1, 2, 1)
     plt.plot(f_cold_iter, label='Hidegindítás', color='red', alpha=0.6)
-    plt.plot(f_warm_iter, label='AI Melegindítás', color='green', linewidth=2)
+    plt.plot(f_warm_iter, label='AI + Dual Melegindítás', color='green', linewidth=2)
     plt.title('TinyMPC ADMM Iterációszámok')
     plt.ylabel('Iterációk (k)')
     plt.legend()
     plt.grid(True, alpha=0.3)
 
     plt.subplot(1, 2, 2)
-    plt.boxplot([f_cold_time, f_warm_time], labels=['Hidegindítás', 'AI + Melegindítás'])
+    plt.boxplot([f_cold_time, f_warm_time], labels=['Hidegindítás', 'AI + Dual Melegindítás'])
     plt.title('Valós Futási Idők (ms)')
     plt.ylabel('Idő (ms)')
     plt.grid(axis='y', linestyle='--')
